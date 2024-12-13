@@ -34,18 +34,21 @@
 #include "output.h"
 #include "masscan.h"
 #include "masscan-status.h"
-#include "string_s.h"
-#include "logger.h"
 #include "proto-banner1.h"
 #include "masscan-app.h"
 #include "main-globals.h"
 #include "pixie-file.h"
 #include "pixie-sockets.h"
 #include "util-malloc.h"
+#include "util-errormsg.h"
+#include "util-logger.h"
 
 #include <limits.h>
 #include <ctype.h>
 #include <string.h>
+
+/* Put this at the bottom of the include lists because of warnings */
+#include "util-safefunc.h"
 
 
 /*****************************************************************************
@@ -102,7 +105,7 @@ status_string(enum PortStatus status)
 const char *
 reason_string(int x, char *buffer, size_t sizeof_buffer)
 {
-    sprintf_s(buffer, sizeof_buffer, "%s%s%s%s%s%s%s%s",
+    snprintf(buffer, sizeof_buffer, "%s%s%s%s%s%s%s%s",
         (x&0x01)?"fin-":"",
         (x&0x02)?"syn-":"",
         (x&0x04)?"rst-":"",
@@ -356,7 +359,7 @@ indexed_filename(const char *filename, unsigned index)
     
 
     /* format the new name */
-    sprintf_s(new_filename, new_length, "%.*s.%02u%s",
+    snprintf(new_filename, new_length, "%.*s.%02u%s",
               (unsigned)ext, filename,
               index,
               filename+ext);
@@ -390,7 +393,9 @@ output_create(const struct Masscan *masscan, unsigned thread_index)
     out->rotate.filesize = masscan->output.rotate.filesize;
     out->redis.port = masscan->redis.port;
     out->redis.ip = masscan->redis.ip;
-    out->is_banner = masscan->is_banners;
+    out->redis.password = masscan ->redis.password;
+    out->is_banner = masscan->is_banners;               /* --banners */
+    out->is_banner_rawudp = masscan->is_banners_rawudp; /* --rawudp */
     out->is_gmt = masscan->is_gmt;
     out->is_interactive = masscan->output.is_interactive;
     out->is_show_open = masscan->output.is_show_open;
@@ -547,9 +552,9 @@ output_do_rotate(struct Output *out, int is_closing)
 
     /* Get the proper timestamp for the file */
     if (out->is_gmt) {
-        err = gmtime_s(&tm, &out->rotate.last);
+        err = safe_gmtime(&tm, &out->rotate.last);
     } else {
-        err = localtime_s(&tm, &out->rotate.last);
+        err = safe_localtime(&tm, &out->rotate.last);
     }
     if (err != 0) {
         free(new_filename);
@@ -572,7 +577,7 @@ again:
             x_off = strlen(filename);
             x_len = 0;
         }
-        sprintf_s(new_filename, new_filename_size,
+        snprintf(new_filename, new_filename_size,
                       "%s/%.*s-%05u%.*s",
                 dir,
                 (unsigned)x_off, filename,
@@ -580,7 +585,7 @@ again:
                 (unsigned)x_len, filename + x_off
                 );
     } else {
-        sprintf_s(new_filename, new_filename_size,
+        snprintf(new_filename, new_filename_size,
                   "%s/%02u%02u%02u-%02u%02u%02u" "-%s",
             dir,
             tm.tm_year % 100,
@@ -633,7 +638,7 @@ again:
 
         fp = open_rotate(out, filename);
         if (fp == NULL) {
-            LOG(0, "rotate: %s: failed: %s\n", filename, strerror_x(errno));
+            LOG(0, "rotate: %s: failed: %s\n", filename, strerror(errno));
         } else {
             close_rotate(out, out->fp);
             out->fp = fp;
@@ -777,11 +782,11 @@ output_report_status(struct Output *out, time_t timestamp, int status,
         fprintf(stdout, "\n");
         fflush(stdout);
 
-    }
-
-
-    if (fp == NULL)
+    } else if (fp == NULL) {
+        ERRMSG("no output file, use `--output-filename <filename>` to set one\n");
+        ERRMSG("for `stdout`, use `--output-filename -`\n");
         return;
+    }
 
     /* Rotate, if we've pass the time limit. Rotating the log files happens
      * inline while writing output, whenever there's output to write to the
@@ -880,7 +885,7 @@ output_report_banner(struct Output *out, time_t now,
      * line screen */
     if (out->is_interactive || out->format == 0 || out->format == Output_Interactive) {
         unsigned count;
-        char banner_buffer[4096];
+        char banner_buffer[MAX_BANNER_LENGTH];
 
         count = fprintf(stdout, "Banner on port %u/%s on %s: [%s] %s",
             port,
